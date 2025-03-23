@@ -160,12 +160,14 @@ instance StoreQueueClass q => QueueStoreClass q (PostgresQueueStore q) where
     SRecipient -> getRcvQueue qId
     SSender -> TM.lookupIO qId senders >>= maybe loadSndQueue getRcvQueue
     SNotifier -> TM.lookupIO qId notifiers >>= maybe loadNtfQueue getRcvQueue
+    SLinkClient -> loadLinkQueue
     where
       PostgresQueueStore {queues, senders, notifiers} = st
       getRcvQueue rId = TM.lookupIO rId queues >>= maybe loadRcvQueue (pure . Right)
       loadRcvQueue = loadQueue " WHERE recipient_id = ?" $ \_ -> pure ()
       loadSndQueue = loadQueue " WHERE sender_id = ?" $ \rId -> TM.insert qId rId senders
       loadNtfQueue = loadQueue " WHERE notifier_id = ?" $ \_ -> pure () -- do NOT cache ref - ntf subscriptions are rare
+      loadLinkQueue = loadQueue " WHERE link_id = ?" $ \_ -> pure ()
       loadQueue condition insertRef =
         E.uninterruptibleMask_ $ runExceptT $ do
           (rId, qRec) <-
@@ -186,6 +188,24 @@ instance StoreQueueClass q => QueueStoreClass q (PostgresQueueStore q) where
                   insertRef rId
                   TM.insert rId sq queues
                   pure sq
+
+  getQueueLinkData :: PostgresQueueStore q -> q -> LinkId -> IO (Either ErrorType QueueLinkData)
+  getQueueLinkData st sq lnkId = runExceptT $ do
+    qr <- ExceptT $ readQueueRecIO $ queueRec sq
+    case queueData qr of
+      Just (lnkId', _) | lnkId' == lnkId ->
+        withDB "getQueueLinkData" st $ \db -> firstRow id AUTH $
+          DB.query db "SELECT immutable_data, user_data FROM msg_queues WHERE link_id = ? AND deleted_at IS NULL" (Only lnkId)
+      _ -> throwE AUTH
+
+  getRcvQueueData :: PostgresQueueStore q -> q -> IO (Either ErrorType (LinkId, QueueLinkData))
+  getRcvQueueData st sq = runExceptT $ do
+    qr <- ExceptT $ readQueueRecIO $ queueRec sq
+    case queueData qr of
+      Just (lnkId, _) ->
+        withDB "getQueueLinkData" st $ \db -> firstRow (lnkId,) AUTH $
+          DB.query db "SELECT immutable_data, user_data FROM msg_queues WHERE link_id = ? AND deleted_at IS NULL" (Only lnkId)
+      _ -> throwE AUTH
 
   secureQueue :: PostgresQueueStore q -> q -> SndPublicAuthKey -> IO (Either ErrorType ())
   secureQueue st sq sKey =

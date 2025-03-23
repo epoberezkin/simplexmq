@@ -44,6 +44,7 @@ data STMQueueStore q = STMQueueStore
   { queues :: TMap RecipientId q,
     senders :: TMap SenderId RecipientId,
     notifiers :: TMap NotifierId RecipientId,
+    links :: TMap LinkId RecipientId,
     storeLog :: TVar (Maybe (StoreLog 'WriteMode))
   }
 
@@ -58,8 +59,9 @@ instance StoreQueueClass q => QueueStoreClass q (STMQueueStore q) where
     queues <- TM.emptyIO
     senders <- TM.emptyIO
     notifiers <- TM.emptyIO
+    links <- TM.emptyIO
     storeLog <- newTVarIO Nothing
-    pure STMQueueStore {queues, senders, notifiers, storeLog}
+    pure STMQueueStore {queues, senders, notifiers, links, storeLog}
 
   closeQueueStore :: STMQueueStore q -> IO ()
   closeQueueStore STMQueueStore {queues, senders, notifiers, storeLog} = do
@@ -98,8 +100,19 @@ instance StoreQueueClass q => QueueStoreClass q (STMQueueStore q) where
       SRecipient -> TM.lookupIO qId queues
       SSender -> TM.lookupIO qId senders $>>= (`TM.lookupIO` queues)
       SNotifier -> TM.lookupIO qId notifiers $>>= (`TM.lookupIO` queues)
+      SLinkClient -> TM.lookupIO qId links $>>= (`TM.lookupIO` queues)
     where
-      STMQueueStore {queues, senders, notifiers} = st
+      STMQueueStore {queues, senders, notifiers, links} = st
+
+  getQueueLinkData :: STMQueueStore q -> q -> LinkId -> IO (Either ErrorType QueueLinkData)
+  getQueueLinkData _ q lnkId = atomically $ readQueueRec (queueRec q) $>>= pure . getData
+    where
+      getData qr = case queueData qr of
+        Just (lnkId', d) | lnkId' == lnkId -> Right d
+        _ -> Left AUTH
+
+  deleteQueueLink :: STMQueueStore q -> q -> IO (Either ErrorType (LinkId, QueueLinkData))
+  deleteQueueLink _ q = atomically $ readQueueRec (queueRec q) $>>= pure . maybe (Left AUTH) Right
 
   secureQueue :: STMQueueStore q -> q -> SndPublicAuthKey -> IO (Either ErrorType ())
   secureQueue st sq sKey =
